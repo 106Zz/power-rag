@@ -262,6 +262,8 @@ public class OllamaLLMService implements LLMService {
         // 工具调用累积器（Ollama 可能分多个 chunk 返回工具调用的参数）
         final StringBuilder[] toolCallAccumulator = new StringBuilder[1];
         final String[] currentToolName = new String[1];
+        final boolean[] inlineThinking = new boolean[]{false};
+        final StringBuilder inlineContentBuffer = new StringBuilder();
 
         lines.forEach(line -> {
             if (line == null || line.isBlank()) {
@@ -275,6 +277,7 @@ public class OllamaLLMService implements LLMService {
                 if (message == null) {
                     // 可能是最终的 done 消息
                     if (chunk.has("done") && chunk.get("done").asBoolean()) {
+                        flushInlineContent(callback, inlineThinking, inlineContentBuffer);
                         callback.onComplete();
                     }
                     return;
@@ -283,17 +286,19 @@ public class OllamaLLMService implements LLMService {
                 // 1. 思考内容（message.thinking 字段）
                 if (message.has("thinking") && !message.get("thinking").isNull()
                         && !message.get("thinking").asText().isEmpty()) {
+                    flushInlineContent(callback, inlineThinking, inlineContentBuffer);
                     callback.onReasoning(message.get("thinking").asText());
                 }
 
                 // 2. 正文内容（message.content 字段）
                 if (message.has("content") && !message.get("content").isNull()
                         && !message.get("content").asText().isEmpty()) {
-                    callback.onContent(message.get("content").asText());
+                    routeContentWithThinkTags(message.get("content").asText(), callback, inlineThinking, inlineContentBuffer);
                 }
 
                 // 3. 工具调用（message.tool_calls 数组）
                 if (message.has("tool_calls") && message.get("tool_calls").isArray()) {
+                    flushInlineContent(callback, inlineThinking, inlineContentBuffer);
                     for (JsonNode tc : message.get("tool_calls")) {
                         JsonNode function = tc.get("function");
                         if (function == null) {
@@ -357,6 +362,7 @@ public class OllamaLLMService implements LLMService {
         // 流结束后确保 callback.onComplete 被调用
         // （如果 done 消息已经触发了 onComplete，这里不会重复，因为 onComplete 幂等）
         try {
+            flushInlineContent(callback, inlineThinking, inlineContentBuffer);
             callback.onComplete();
         } catch (Exception ignored) {
             // 已完成则忽略
@@ -364,6 +370,79 @@ public class OllamaLLMService implements LLMService {
     }
 
     // ========== 辅助方法 ==========
+
+    /**
+     * Route inline <think> tags from message.content into the reasoning callback.
+     */
+    private void routeContentWithThinkTags(
+            String content,
+            StreamCallback callback,
+            boolean[] inlineThinking,
+            StringBuilder buffer) {
+        if (content == null || content.isEmpty()) {
+            return;
+        }
+
+        buffer.append(content);
+        while (buffer.length() > 0) {
+            String text = buffer.toString();
+            if (inlineThinking[0]) {
+                int end = text.indexOf("</think>");
+                if (end >= 0) {
+                    String reasoning = text.substring(0, end);
+                    if (!reasoning.isEmpty()) {
+                        callback.onReasoning(reasoning);
+                    }
+                    buffer.delete(0, end + "</think>".length());
+                    inlineThinking[0] = false;
+                    continue;
+                }
+
+                int emitLength = Math.max(0, text.length() - ("</think>".length() - 1));
+                if (emitLength > 0) {
+                    callback.onReasoning(text.substring(0, emitLength));
+                    buffer.delete(0, emitLength);
+                }
+                return;
+            }
+
+            int start = text.indexOf("<think>");
+            if (start >= 0) {
+                String normalContent = text.substring(0, start);
+                if (!normalContent.isEmpty()) {
+                    callback.onContent(normalContent);
+                }
+                buffer.delete(0, start + "<think>".length());
+                inlineThinking[0] = true;
+                continue;
+            }
+
+            int emitLength = Math.max(0, text.length() - ("<think>".length() - 1));
+            if (emitLength > 0) {
+                callback.onContent(text.substring(0, emitLength));
+                buffer.delete(0, emitLength);
+            }
+            return;
+        }
+    }
+
+    private void flushInlineContent(
+            StreamCallback callback,
+            boolean[] inlineThinking,
+            StringBuilder buffer) {
+        if (buffer.length() == 0) {
+            return;
+        }
+
+        String remaining = buffer.toString();
+        buffer.setLength(0);
+        if (inlineThinking[0]) {
+            callback.onReasoning(remaining);
+            inlineThinking[0] = false;
+        } else {
+            callback.onContent(remaining);
+        }
+    }
 
     /**
      * Spring AI Message → Ollama role 字符串

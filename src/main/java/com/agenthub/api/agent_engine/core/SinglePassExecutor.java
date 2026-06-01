@@ -38,7 +38,7 @@ import java.util.concurrent.Executor;
  * <h3>模型分流策略：</h3>
  * <ul>
  *   <li>KB_QA → 微调模型 (qwen3.5-agenthub) + 只给 knowledge_search 工具</li>
- *   <li>CHAT → 基座模型 (qwen3.5) + 给除 knowledge_search 外的所有工具</li>
+ *   <li>CHAT → 基座模型 (qwen3.5) + 给所有工具，允许按需调用 knowledge_search 兜底</li>
  * </ul>
  *
  * <h3>执行流程：</h3>
@@ -160,6 +160,7 @@ public class SinglePassExecutor {
 
         StringBuilder fullAnswer = new StringBuilder();
         StringBuilder thinkingContent = new StringBuilder();
+        final boolean[] collectingThinking = new boolean[]{false};
 
         return Flux.create(sink -> {
             try {
@@ -221,7 +222,7 @@ public class SinglePassExecutor {
                 doStreamChat(messages, context)
                         .doOnNext(chunk -> {
                             if (!chunk.isEmpty()) {
-                                fullAnswer.append(chunk);
+                                appendChunkForPersistence(chunk, fullAnswer, thinkingContent, collectingThinking);
                                 sink.next(chunk);
                             }
                         })
@@ -544,12 +545,12 @@ public class SinglePassExecutor {
             @Override
             public void onReasoning(String reasoning) {
                 if (reasoning != null && !reasoning.isEmpty()) {
-                    if (!newState[0]) {
+                    if (!newState[0] || newState[1]) {
                         sink.next("@@THINK_START@@");
                         newState[0] = true;
+                        newState[1] = false;
                     }
                     sink.next(reasoning);
-                    secondRoundAnswer.append(reasoning);
                 }
             }
 
@@ -559,6 +560,7 @@ public class SinglePassExecutor {
                     if (newState[0] && !newState[1]) {
                         sink.next("@@THINK_END@@");
                         newState[1] = true;
+                        newState[0] = false;
                     }
                     sink.next(content);
                     secondRoundAnswer.append(content);
@@ -598,7 +600,7 @@ public class SinglePassExecutor {
      * 根据意图分流：
      * <ul>
      *   <li>KB_QA → 微调模型 + 只给 knowledge_search</li>
-     *   <li>CHAT → 基座模型 + 除 knowledge_search 外的所有工具</li>
+     *   <li>CHAT → 基座模型 + 所有工具，允许按需调用 knowledge_search 兜底</li>
      * </ul>
      */
     private Flux<String> doStreamChat(List<Message> messages, AgentContext context) {
@@ -616,8 +618,8 @@ public class SinglePassExecutor {
             }
         } else {
             activeModel = baseModel;
-            tools = toolRegistry.getTools(Set.of("knowledge_search"));  // 排除 knowledge_search
-            log.debug("[SinglePass] CHAT → 基座模型 + 其他工具, 工具数: {}", tools.size());
+            tools = toolRegistry.getTools(null);
+            log.debug("[SinglePass] CHAT → 基座模型 + 所有工具（含 knowledge_search 兜底）, 工具数: {}", tools.size());
         }
 
         final String model = activeModel;
@@ -631,9 +633,10 @@ public class SinglePassExecutor {
                 @Override
                 public void onReasoning(String reasoning) {
                     if (reasoning != null && !reasoning.isEmpty()) {
-                        if (!state[0]) {
+                        if (!state[0] || state[1]) {
                             sink.next("@@THINK_START@@");
                             state[0] = true;
+                            state[1] = false;
                         }
                         sink.next(reasoning);
                     }
@@ -645,6 +648,7 @@ public class SinglePassExecutor {
                         if (state[0] && !state[1]) {
                             sink.next("@@THINK_END@@");
                             state[1] = true;
+                            state[0] = false;
                         }
                         sink.next(content);
                     }
@@ -690,6 +694,58 @@ public class SinglePassExecutor {
     }
 
     // ==================== Judge 审计 ====================
+
+    private void appendChunkForPersistence(
+            String chunk,
+            StringBuilder answer,
+            StringBuilder thinking,
+            boolean[] collectingThinking) {
+        if (chunk == null || chunk.isEmpty()) {
+            return;
+        }
+
+        if (chunk.startsWith("__TOOL_CALL__:")) {
+            thinking.append("\n[调用工具: ")
+                    .append(chunk.substring("__TOOL_CALL__:".length()).trim())
+                    .append("]\n");
+            return;
+        }
+
+        String remaining = chunk;
+        while (!remaining.isEmpty()) {
+            int start = remaining.indexOf("@@THINK_START@@");
+            int end = remaining.indexOf("@@THINK_END@@");
+
+            if (start < 0 && end < 0) {
+                appendToCurrentBuffer(remaining, answer, thinking, collectingThinking[0]);
+                return;
+            }
+
+            boolean nextIsStart = start >= 0 && (end < 0 || start < end);
+            int markerIndex = nextIsStart ? start : end;
+            String beforeMarker = remaining.substring(0, markerIndex);
+            appendToCurrentBuffer(beforeMarker, answer, thinking, collectingThinking[0]);
+
+            String marker = nextIsStart ? "@@THINK_START@@" : "@@THINK_END@@";
+            collectingThinking[0] = nextIsStart;
+            remaining = remaining.substring(markerIndex + marker.length());
+        }
+    }
+
+    private void appendToCurrentBuffer(
+            String text,
+            StringBuilder answer,
+            StringBuilder thinking,
+            boolean collectingThinking) {
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        if (collectingThinking) {
+            thinking.append(text);
+        } else {
+            answer.append(text);
+        }
+    }
 
     private void asyncJudge(AgentContext context, String answer) {
         CompletableFuture.runAsync(() -> {
