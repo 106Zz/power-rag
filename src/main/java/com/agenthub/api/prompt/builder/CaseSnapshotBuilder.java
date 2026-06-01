@@ -350,6 +350,7 @@ public class CaseSnapshotBuilder {
             judgeNode.put("raw_output", rawOutput);
             judgeNode.put("judged_at", LocalDateTime.now().toString());
             this.snapshot.setAiJudgeResult(judgeNode);
+            this.snapshot.setIsEvaluated(true);
         } catch (Exception e) {
             log.warn("[CaseSnapshotBuilder] 设置 AI Judge 结果失败: {}", e.getMessage());
         }

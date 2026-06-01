@@ -168,10 +168,15 @@ public class SysPromptServiceImpl extends ServiceImpl<SysPromptMapper, SysPrompt
     public PageResult<PromptVO> selectPage(PromptQueryRequest request) {
         LambdaQueryWrapper<SysPrompt> wrapper = new LambdaQueryWrapper<>();
 
-        // 提示词代码模糊查询
-        wrapper.like(StrUtil.isNotBlank(request.getPromptCode()), SysPrompt::getPromptCode, request.getPromptCode());
-        // 提示词名称模糊查询
-        wrapper.like(StrUtil.isNotBlank(request.getPromptName()), SysPrompt::getPromptName, request.getPromptName());
+        // 关键词搜索：代码或名称任一匹配即可 (OR)
+        boolean hasKeyword = StrUtil.isNotBlank(request.getPromptCode());
+        if (hasKeyword) {
+            String keyword = request.getPromptCode();
+            wrapper.and(w -> w
+                    .like(SysPrompt::getPromptCode, keyword)
+                    .or()
+                    .like(SysPrompt::getPromptName, keyword));
+        }
         // 提示词类型精确查询
         if (StrUtil.isNotBlank(request.getPromptType())) {
             try {

@@ -204,12 +204,12 @@ public class EvalDashboardServiceImpl implements EvalDashboardService {
 
     @Override
     public PageResult<EvalDashboardVO.BadCaseItem> getBadCases(int pageNum, int pageSize) {
-        // 查询失败 + AI Judge 拦截的 Case
+        // 查询系统失败 OR AI Judge 判定失败的 Case
         LambdaQueryWrapper<CaseSnapshot> wrapper = new LambdaQueryWrapper<>();
         wrapper.and(w -> w
                 .eq(CaseSnapshot::getStatus, CaseStatus.FAILED)
                 .or()
-                .eq(CaseSnapshot::getIsEvaluated, true));
+                .apply("ai_judge_result->>'passed' = 'false'"));
         wrapper.orderByDesc(CaseSnapshot::getRequestTime);
 
         IPage<CaseSnapshot> page = caseSnapshotMapper.selectPage(
