@@ -1,6 +1,6 @@
-<div align="center">
+<img width="2179" height="761" alt="image" src="https://github.com/user-attachments/assets/e038e1bb-d1f4-4acb-9a39-217b4ce43d4b" /><div align="center">
 
-# AgentHub
+# power-rag
 
 **面向电力行业的智能知识库 RAG 问答系统**
 
